@@ -1,0 +1,48 @@
+# mcp-moonraker configuration
+#
+# Precedence: built-in defaults < this file < environment variables < CLI flags.
+# Keep secrets out of this file. Use MOONRAKER_API_KEY, or
+# MCP_MOONRAKER_HTTP_TOKEN for the HTTP transport.
+
+[moonraker]
+url = "http://127.0.0.1:7125"
+timeout_secs = 15
+tls_verify = true
+max_response_bytes = 8388608
+
+[server]
+# "stdio" is the zero-friction default for local agents.
+transport = "stdio"
+
+[server.http]
+host = "127.0.0.1"
+port = 8765
+path = "/mcp"
+allow_unauthenticated = false
+
+[policy]
+read_only = false
+allow_mutations = true
+# Arbitrary G-code is powerful and easy to misuse. Leave this off unless needed.
+allow_raw_gcode = false
+# Service restarts, reboots, shutdowns, and updates.
+allow_host_admin = false
+allow_config_write = false
+max_hotend_temp = 300.0
+max_bed_temp = 120.0
+disable_emergency_stop = false
+
+[approval]
+# in_band: the agent receives a single-use phrase.
+# out_of_band: a human must run `mcp-moonraker approve <id>`.
+# both: phrase plus human approval (recommended for remote deployments).
+mode = "in_band"
+ttl_secs = 120
+
+[camera]
+max_bytes = 8388608
+timeout_secs = 10
+allow_private_hosts = true
+
+[logging]
+level = "info"

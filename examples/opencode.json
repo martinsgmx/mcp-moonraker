@@ -1,0 +1,14 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "moonraker": {
+      "type": "local",
+      "command": ["mcp-moonraker"],
+      "enabled": true,
+      "environment": {
+        "MOONRAKER_URL": "http://192.168.1.50:7125",
+        "MCP_MOONRAKER_APPROVAL_MODE": "in_band"
+      }
+    }
+  }
+}

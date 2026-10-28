@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "moonraker": {
+      "command": "mcp-moonraker",
+      "env": {
+        "MOONRAKER_URL": "http://192.168.1.50:7125",
+        "MCP_MOONRAKER_APPROVAL_MODE": "in_band"
+      }
+    }
+  }
+}

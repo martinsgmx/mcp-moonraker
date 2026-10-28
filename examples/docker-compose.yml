@@ -1,0 +1,46 @@
+# Example deployment: HTTP transport in Docker, loopback-only host port.
+#
+# Usage:
+#   export MOONRAKER_URL=http://192.168.1.50:7125
+#   export MCP_MOONRAKER_HTTP_TOKEN="$(openssl rand -hex 32)"
+#   docker compose -f examples/docker-compose.yml up -d --build
+#
+# Approve a pending action inside the container:
+#   docker compose -f examples/docker-compose.yml exec mcp-moonraker \
+#     mcp-moonraker pending
+#   docker compose -f examples/docker-compose.yml exec mcp-moonraker \
+#     mcp-moonraker approve apr_...
+#
+# Put a TLS reverse proxy in front for any access beyond localhost.
+
+services:
+  mcp-moonraker:
+    build:
+      context: ..
+    image: mcp-moonraker:local
+    restart: unless-stopped
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "127.0.0.1:8765:8765"
+    environment:
+      MOONRAKER_URL: ${MOONRAKER_URL:-http://host.docker.internal:7125}
+      MCP_MOONRAKER_HTTP_HOST: 0.0.0.0
+      MCP_MOONRAKER_HTTP_TOKEN: ${MCP_MOONRAKER_HTTP_TOKEN:?set MCP_MOONRAKER_HTTP_TOKEN}
+      MCP_MOONRAKER_STATE_DIR: /var/lib/mcp-moonraker
+      MCP_MOONRAKER_APPROVAL_MODE: ${MCP_MOONRAKER_APPROVAL_MODE:-out_of_band}
+      MCP_MOONRAKER_LOG_LEVEL: ${MCP_MOONRAKER_LOG_LEVEL:-info}
+    volumes:
+      - mcp-moonraker-state:/var/lib/mcp-moonraker
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8765/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+volumes:
+  mcp-moonraker-state:

@@ -1,0 +1,29 @@
+# Build output
+/target/
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+/mcp-moonraker.toml
+*.local.toml
+*.secret.toml
+secrets/
+approvals/
+state/
+
+# Logs and runtime artifacts
+*.log
+*.jsonl
+/tmp/
+
+# Editor and OS noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*~
+
+# Local test outputs
+/coverage/

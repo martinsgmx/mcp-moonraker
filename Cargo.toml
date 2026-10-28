@@ -1,0 +1,88 @@
+[package]
+name = "mcp-moonraker"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+description = "A safe, structured Model Context Protocol server for Moonraker / Klipper 3D printers"
+license = "MIT"
+repository = "https://github.com/martinsgmx/mcp-moonraker"
+readme = "README.md"
+keywords = ["mcp", "moonraker", "klipper", "3d-printing", "model-context-protocol"]
+categories = ["api-bindings", "web-programming"]
+default-run = "mcp-moonraker"
+
+[lib]
+name = "mcp_moonraker"
+path = "src/lib.rs"
+
+[[bin]]
+name = "mcp-moonraker"
+path = "src/main.rs"
+
+[dependencies]
+rust-mcp-sdk = { version = "1.1.0", default-features = false, features = [
+    "server",
+    "macros",
+    "stdio",
+    "streamable-http",
+    "sse",
+    "auth",
+] }
+rust-mcp-axum = { version = "1.0.2", default-features = false }
+
+async-trait = "0.1"
+base64 = "0.22"
+clap = { version = "4", features = ["derive", "env"] }
+dirs = "6"
+fs2 = "0.4"
+futures-util = "0.3"
+hex = "0.4"
+http = "1"
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "rustls-tls",
+    "stream",
+] }
+secrecy = { version = "0.10", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "macros",
+    "signal",
+    "time",
+    "fs",
+    "io-util",
+    "net",
+    "sync",
+] }
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+url = "2"
+uuid = { version = "1", features = ["v4", "serde"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["full"] }
+wiremock = "0.6"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+strip = true
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
+too_many_lines = "allow"
+struct_excessive_bools = "allow"

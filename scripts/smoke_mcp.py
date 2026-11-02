@@ -52,7 +52,7 @@ def main() -> int:
             "params": {
                 "protocolVersion": PROTOCOL_VERSION,
                 "capabilities": {},
-                "clientInfo": {"name": "mcp-moonraker-smoke", "version": "0.1.0"},
+                "clientInfo": {"name": "mcp-moonraker-smoke", "version": "0.1.3"},
             },
         },
         {"jsonrpc": "2.0", "method": "notifications/initialized"},

@@ -6,6 +6,8 @@ versioning.
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-11-02
+
 ### Added
 
 - `moonraker.script_timeout_secs` / `MOONRAKER_SCRIPT_TIMEOUT_SECS` (default
@@ -73,4 +75,5 @@ Initial release.
 - Layered TOML/environment/flag configuration with validation and a starter config.
 - Docker image, CI workflow, agent examples, and a read-only MCP smoke test.
 
+[0.1.3]: https://github.com/martinsgmx/mcp-moonraker/releases/tag/v0.1.3
 [0.1.0]: https://github.com/martinsgmx/mcp-moonraker/releases/tag/v0.1.0

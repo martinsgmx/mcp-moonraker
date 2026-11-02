@@ -40,6 +40,9 @@ const STARTER_CONFIG: &str = r#"# mcp-moonraker configuration
 [moonraker]
 url = "http://127.0.0.1:7125"
 timeout_secs = 15
+# printer.gcode.script only replies once Klipper has finished the script, so
+# homing (G28) and long macros use this larger budget.
+script_timeout_secs = 120
 tls_verify = true
 max_response_bytes = 8388608
 

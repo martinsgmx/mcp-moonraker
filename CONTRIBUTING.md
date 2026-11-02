@@ -101,6 +101,7 @@ Update the relevant file when behavior changes:
 - `docs/tools.md` — tool list, arguments, and risk
 - `docs/safety.md` — policy and approval behavior
 - `docs/deployment.md` — transports, service units, Docker, proxies
+- `docs/setup-and-security.md` — network topologies, Moonraker `[authorization]`, connectivity troubleshooting
 - `SECURITY.md` — threat model or control changes
 - `CHANGELOG.md` — user-visible changes
 

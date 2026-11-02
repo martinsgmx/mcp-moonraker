@@ -20,8 +20,9 @@ Print the resolved values (secrets omitted) with `mcp-moonraker print-config`.
 | TOML key | Environment | Default | Notes |
 | --- | --- | --- | --- |
 | `moonraker.url` | `MOONRAKER_URL` | `http://127.0.0.1:7125` | `http`/`https`; may include a reverse-proxy path prefix; no query or fragment |
-| `moonraker.api_key` | `MOONRAKER_API_KEY` | unset | Sent as `X-Api-Key`; prefer the environment |
+| `moonraker.api_key` | `MOONRAKER_API_KEY` | unset | Sent as `X-Api-Key`; prefer the environment. Get the value from `curl http://127.0.0.1:7125/access/api_key` on the printer host; see [setup-and-security.md](setup-and-security.md) |
 | `moonraker.timeout_secs` | `MOONRAKER_TIMEOUT_SECS` | `15` | 1–300 seconds |
+| `moonraker.script_timeout_secs` | `MOONRAKER_SCRIPT_TIMEOUT_SECS` | `120` | 1–600 seconds; used for `printer.gcode.script` calls, which return only after Klipper finishes the script (homing, long macros, `TEMPERATURE_WAIT`) |
 | `moonraker.tls_verify` | `MOONRAKER_TLS_VERIFY` | `true` | Disable only for a trusted self-signed host |
 | `moonraker.max_response_bytes` | `MOONRAKER_MAX_RESPONSE_BYTES` | `8388608` | 1 KiB–64 MiB |
 

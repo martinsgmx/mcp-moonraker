@@ -22,6 +22,7 @@
 pub mod admin;
 pub mod args;
 pub mod camera_tools;
+pub mod connectivity;
 pub mod files;
 pub mod heaters;
 pub mod motion;
@@ -153,8 +154,9 @@ impl ToolRegistry {
     #[must_use]
     pub fn build() -> Self {
         let mut specs = BTreeMap::new();
-        let all = state::specs()
+        let all = connectivity::specs()
             .into_iter()
+            .chain(state::specs())
             .chain(camera_tools::specs())
             .chain(files::specs())
             .chain(heaters::specs())

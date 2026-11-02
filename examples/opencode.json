@@ -3,10 +3,11 @@
   "mcp": {
     "moonraker": {
       "type": "local",
-      "command": ["mcp-moonraker"],
+      "command": ["/home/you/.cargo/bin/mcp-moonraker"],
       "enabled": true,
       "environment": {
         "MOONRAKER_URL": "http://192.168.1.50:7125",
+        "MOONRAKER_API_KEY": "set-only-if-moonraker-requires-it",
         "MCP_MOONRAKER_APPROVAL_MODE": "in_band"
       }
     }

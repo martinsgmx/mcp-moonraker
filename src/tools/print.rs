@@ -281,10 +281,7 @@ async fn raw_gcode(
             "script must not contain NUL bytes".to_string(),
         ));
     }
-    let response = ctx
-        .client
-        .call_value("printer.gcode.script", Some(json!({"script": script})))
-        .await?;
+    let response = ctx.client.call_gcode_script(&script).await?;
     Ok(json_result(&json!({"result": response}), None))
 }
 

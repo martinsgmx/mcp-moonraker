@@ -12,8 +12,8 @@ use crate::{
     safety::{Capability, Risk},
     tools::{
         args::{gcode_quote, validate_object_name, Args},
-        json_result, object_names, query_objects, require_object, schema_object, Gate, ToolContext,
-        ToolSpec,
+        empty_schema, json_result, no_summary, object_names, query_objects, require_object,
+        schema_object, Gate, ToolContext, ToolSpec,
     },
 };
 
@@ -21,6 +21,20 @@ use crate::{
 #[must_use]
 pub fn specs() -> Vec<ToolSpec> {
     vec![
+        ToolSpec {
+            name: "moonraker_list_macros",
+            title: "List loaded Klipper macros",
+            description: "List the `gcode_macro` objects currently loaded in Klipper, with their \
+                          defined variables when present. Use this before moonraker_run_macro to \
+                          pick a valid macro name. Read-only.",
+            allowed_args: &[],
+            capability: Capability::Read,
+            risk: Risk::Read,
+            gate: Gate::Policy,
+            summarize: no_summary,
+            schema: empty_schema,
+            handler: |ctx, _args| Box::pin(list_macros(ctx)),
+        },
         ToolSpec {
             name: "moonraker_home_axes",
             title: "Home printer axes",
@@ -81,17 +95,17 @@ pub fn specs() -> Vec<ToolSpec> {
         ToolSpec {
             name: "moonraker_run_macro",
             title: "Run a Klipper macro",
-            description:
-                "DESTRUCTIVE: execute a loaded `gcode_macro` by name, without parameters. \
-                          Macros can perform arbitrary actions (including heating and motion), so \
-                          this always requires double confirmation. The first call returns an \
-                          approval prompt; call moonraker_confirm_action to execute.",
-            allowed_args: &["name"],
+            description: "DESTRUCTIVE: execute a loaded `gcode_macro` by name, with optional \
+                           parameters (for example BED=110). Macros can perform arbitrary actions \
+                           (including heating and motion), so this always requires double \
+                           confirmation. The first call returns an approval prompt; call \
+                           moonraker_confirm_action to execute.",
+            allowed_args: &["name", "params"],
             capability: Capability::Mutation,
             risk: Risk::High,
             gate: Gate::Policy,
             summarize: summarize_macro,
-            schema: macro_schema,
+            schema: run_macro_schema,
             handler: |ctx, args| Box::pin(run_macro(ctx, args)),
         },
     ]
@@ -142,10 +156,7 @@ async fn home_axes(
             .collect::<Vec<_>>()
             .join(" ")
     );
-    let response = ctx
-        .client
-        .call_value("printer.gcode.script", Some(json!({"script": script})))
-        .await?;
+    let response = ctx.client.call_gcode_script(&script).await?;
     Ok(json_result(
         &json!({"axes": axes, "result": response}),
         None,
@@ -254,10 +265,7 @@ async fn move_axis(
         "SAVE_GCODE_STATE NAME=mcp_moonraker_move\nG91\nG1 {axis}{distance:.3} F{feed:.0}\n\
          RESTORE_GCODE_STATE NAME=mcp_moonraker_move MOVE=0"
     );
-    let response = ctx
-        .client
-        .call_value("printer.gcode.script", Some(json!({"script": script})))
-        .await?;
+    let response = ctx.client.call_gcode_script(&script).await?;
 
     Ok(json_result(
         &json!({
@@ -315,10 +323,7 @@ async fn set_speed_factor(
     }
     let response = ctx
         .client
-        .call_value(
-            "printer.gcode.script",
-            Some(json!({"script": format!("M220 S{percent:.1}")})),
-        )
+        .call_gcode_script(&format!("M220 S{percent:.1}"))
         .await?;
     Ok(json_result(
         &json!({"percent": percent, "result": response}),
@@ -339,10 +344,7 @@ async fn set_flow_factor(
     }
     let response = ctx
         .client
-        .call_value(
-            "printer.gcode.script",
-            Some(json!({"script": format!("M221 S{percent:.1}")})),
-        )
+        .call_gcode_script(&format!("M221 S{percent:.1}"))
         .await?;
     Ok(json_result(
         &json!({"percent": percent, "result": response}),
@@ -362,19 +364,49 @@ fn macro_schema() -> Value {
     )
 }
 
+fn run_macro_schema() -> Value {
+    let mut schema = macro_schema();
+    if let Some(map) = schema.as_object_mut() {
+        map.insert(
+            "params".to_string(),
+            json!({
+                "type": "object",
+                "additionalProperties": {
+                    "type": ["string", "number", "boolean"]
+                },
+                "maxProperties": 16,
+                "description": "Optional macro parameters as key/value pairs, rendered as NAME KEY=VALUE. Numbers are passed unquoted, strings are G-code quoted, booleans become 1/0."
+            }),
+        );
+    }
+    schema
+}
+
 fn summarize_macro(args: &Value) -> String {
     let name = args
         .get("name")
         .and_then(Value::as_str)
         .unwrap_or("<unknown>");
-    format!("Execute Klipper macro '{name}'.")
+    let params = args.get("params").and_then(Value::as_object);
+    match params {
+        Some(map) if !map.is_empty() => {
+            let mut keys = map.keys().cloned().collect::<Vec<_>>();
+            keys.sort();
+            format!(
+                "Execute Klipper macro '{name}' with parameters: {}.",
+                keys.join(", ")
+            )
+        }
+        _ => format!("Execute Klipper macro '{name}'."),
+    }
 }
 
 async fn run_macro(
     ctx: &ToolContext,
     arguments: Value,
 ) -> Result<rust_mcp_sdk::schema::CallToolResult> {
-    let args = Args::parse(Some(arguments), &["name"])?;
+    let params = macro_params(&arguments)?;
+    let args = Args::parse(Some(arguments), &["name", "params"])?;
     let name = args.required_string("name")?.to_ascii_uppercase();
     if name.is_empty()
         || name.len() > 64
@@ -401,12 +433,117 @@ async fn run_macro(
         )));
     }
 
-    let response = ctx
-        .client
-        .call_value("printer.gcode.script", Some(json!({"script": name})))
-        .await?;
+    let script = if params.is_empty() {
+        name.clone()
+    } else {
+        format!("{} {}", name, params.join(" "))
+    };
+    let response = ctx.client.call_gcode_script(&script).await?;
     Ok(json_result(
-        &json!({"macro": name, "result": response}),
+        &json!({
+            "macro": name,
+            "script": script,
+            "result": response,
+        }),
+        None,
+    ))
+}
+
+/// Maximum accepted macro parameters; silently tighter than the schema cap.
+const MAX_MACRO_PARAMS: usize = 16;
+
+/// Extract and validate optional macro `params` from the raw arguments.
+///
+/// Keys become G-code parameter names, so they must be plain identifiers.
+/// Values are limited to strings, numbers, and booleans; strings are G-code
+/// quoted, booleans become `1`/`0`.
+fn macro_params(arguments: &Value) -> Result<Vec<String>> {
+    let Some(map) = arguments
+        .get("params")
+        .filter(|value| !value.is_null())
+        .and_then(Value::as_object)
+    else {
+        return Ok(Vec::new());
+    };
+    if map.len() > MAX_MACRO_PARAMS {
+        return Err(Error::InvalidArguments(format!(
+            "at most {MAX_MACRO_PARAMS} macro parameters are allowed"
+        )));
+    }
+    let mut rendered = Vec::with_capacity(map.len());
+    for (key, value) in map {
+        if key.is_empty()
+            || key.len() > 32
+            || !key
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+        {
+            return Err(Error::InvalidArguments(
+                "macro parameter names must contain only letters, digits and '_'".to_string(),
+            ));
+        }
+        let text = match value {
+            Value::String(text) => gcode_quote(text),
+            Value::Bool(true) => "1".to_string(),
+            Value::Bool(false) => "0".to_string(),
+            Value::Number(number) if number.is_f64() || number.is_i64() || number.is_u64() => {
+                number.to_string()
+            }
+            _ => {
+                return Err(Error::InvalidArguments(
+                    "macro parameter values must be strings, numbers, or booleans".to_string(),
+                ));
+            }
+        };
+        rendered.push(format!("{key}={text}"));
+    }
+    Ok(rendered)
+}
+
+async fn list_macros(ctx: &ToolContext) -> Result<rust_mcp_sdk::schema::CallToolResult> {
+    let names = object_names(ctx).await?;
+    let macros: Vec<String> = names
+        .iter()
+        .filter_map(|name| name.strip_prefix("gcode_macro ").map(str::to_string))
+        .collect();
+
+    let values: Vec<Value> = if macros.is_empty() {
+        Vec::new()
+    } else {
+        let objects = macros
+            .iter()
+            .map(|name| (format!("gcode_macro {name}"), json!(null)))
+            .collect::<serde_json::Map<String, Value>>();
+        // Variables (if defined) come back in the status payload; a failed or
+        // empty query degrades to names-only output.
+        query_objects(ctx, objects)
+            .await
+            .ok()
+            .and_then(|status| status.get("status").cloned())
+            .and_then(|status| status.as_object().cloned())
+            .map_or_else(
+                || macros.iter().map(|name| json!({"name": name})).collect(),
+                |status| {
+                    macros
+                        .iter()
+                        .map(|name| {
+                            let object = format!("gcode_macro {name}");
+                            json!({
+                                "name": name,
+                                "variables": status
+                                    .get(&object)
+                                    .and_then(|entry| entry.get("variables"))
+                                    .cloned()
+                                    .unwrap_or(Value::Null),
+                            })
+                        })
+                        .collect()
+                },
+            )
+    };
+
+    Ok(json_result(
+        &json!({"count": values.len(), "macros": values}),
         None,
     ))
 }

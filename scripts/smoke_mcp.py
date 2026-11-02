@@ -83,27 +83,33 @@ def main() -> int:
             "method": "tools/call",
             "params": {"name": "moonraker_policy_info", "arguments": {}},
         },
+        {
+            "jsonrpc": "2.0",
+            "id": 9,
+            "method": "tools/call",
+            "params": {"name": "moonraker_verify_connection", "arguments": {}},
+        },
     ]
 
-    expected = 8
+    expected = 9
     if args.camera:
         requests.extend(
             [
                 {
                     "jsonrpc": "2.0",
-                    "id": 9,
+                    "id": 10,
                     "method": "tools/call",
                     "params": {"name": "moonraker_cameras", "arguments": {}},
                 },
                 {
                     "jsonrpc": "2.0",
-                    "id": 10,
+                    "id": 11,
                     "method": "tools/call",
                     "params": {"name": "moonraker_camera_snapshot", "arguments": {}},
                 },
             ]
         )
-        expected = 10
+        expected = 11
 
     try:
         proc = subprocess.Popen(
@@ -179,6 +185,7 @@ def main() -> int:
     tools = seen.get(2, {}).get("result", {}).get("tools", [])
     tool_names = {tool.get("name") for tool in tools}
     check("moonraker_server_info" in tool_names, "tools/list contains moonraker_server_info")
+    check("moonraker_verify_connection" in tool_names, "tools/list contains verify tool")
     check("moonraker_camera_snapshot" in tool_names, "tools/list contains camera tool")
     check(len(tools) >= 40, f"tools/list count ({len(tools)})")
 
@@ -198,6 +205,10 @@ def main() -> int:
     )
     check('"heaters"' in result_text(seen.get(6, {})), "temperatures result")
     check('"text"' in json.dumps(seen.get(7, {})), "resource read")
+    check(
+        '"connected"' in result_text(seen.get(9, {})),
+        "verify_connection result",
+    )
     check('"policy"' in result_text(seen.get(8, {})), "policy_info result")
 
     if args.camera:

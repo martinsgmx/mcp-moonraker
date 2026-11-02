@@ -91,6 +91,11 @@ pub struct MoonrakerConfig {
     pub api_key: Option<SecretString>,
     /// Request timeout for normal calls.
     pub timeout_secs: u64,
+    /// Timeout for `printer.gcode.script` calls. Klipper only replies once the
+    /// script has finished executing, so motion-heavy scripts (e.g. `G28`
+    /// homing) and blocking macros (e.g. `TEMPERATURE_WAIT`) need a larger
+    /// budget than normal RPCs.
+    pub script_timeout_secs: u64,
     /// Verify TLS certificates (disable only for a trusted self-signed host).
     pub tls_verify: bool,
     /// Maximum JSON body size accepted from Moonraker.
@@ -103,6 +108,7 @@ impl Default for MoonrakerConfig {
             url: "http://127.0.0.1:7125".to_string(),
             api_key: None,
             timeout_secs: 15,
+            script_timeout_secs: 120,
             tls_verify: true,
             max_response_bytes: 8 * 1024 * 1024,
         }
@@ -323,6 +329,9 @@ impl Config {
         if let Some(value) = env_u64("MOONRAKER_TIMEOUT_SECS")? {
             self.moonraker.timeout_secs = value;
         }
+        if let Some(value) = env_u64("MOONRAKER_SCRIPT_TIMEOUT_SECS")? {
+            self.moonraker.script_timeout_secs = value;
+        }
         if let Some(value) = env_bool("MOONRAKER_TLS_VERIFY")? {
             self.moonraker.tls_verify = value;
         }
@@ -456,6 +465,11 @@ impl Config {
                 "Moonraker timeout must be between 1 and 300 seconds".into(),
             ));
         }
+        if self.moonraker.script_timeout_secs == 0 || self.moonraker.script_timeout_secs > 600 {
+            return Err(Error::Config(
+                "Moonraker script timeout must be between 1 and 600 seconds".into(),
+            ));
+        }
         if !(1024..=64 * 1024 * 1024).contains(&self.moonraker.max_response_bytes) {
             return Err(Error::Config(
                 "max_response_bytes must be between 1 KiB and 64 MiB".into(),
@@ -522,6 +536,12 @@ impl Config {
         Duration::from_secs(self.moonraker.timeout_secs)
     }
 
+    /// G-code script timeout as a `Duration`.
+    #[must_use]
+    pub fn moonraker_script_timeout(&self) -> Duration {
+        Duration::from_secs(self.moonraker.script_timeout_secs)
+    }
+
     /// Re-run normalization and validation after programmatic overrides
     /// (for example command-line flags applied by `main.rs`).
     pub fn revalidate(&mut self) -> Result<()> {
@@ -561,6 +581,7 @@ impl Config {
                 "url": crate::safety::redact::redact_url_userinfo(&self.moonraker.url),
                 "api_key_configured": self.moonraker.api_key.is_some(),
                 "timeout_secs": self.moonraker.timeout_secs,
+                "script_timeout_secs": self.moonraker.script_timeout_secs,
                 "tls_verify": self.moonraker.tls_verify,
                 "max_response_bytes": self.moonraker.max_response_bytes,
             },

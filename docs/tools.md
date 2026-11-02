@@ -12,6 +12,7 @@ policy rules.
 
 | Tool | Risk | Arguments | What it does |
 | --- | --- | --- | --- |
+| `moonraker_verify_connection` | read | — | Probe Moonraker: `connected`, latency, Moonraker/Klipper versions; on failure a classified diagnosis with next steps (never an error result) |
 | `moonraker_server_info` | read | — | Moonraker version, components, Klippy connection state |
 | `moonraker_printer_status` | read | — | Curated snapshot: print state/progress, position, homing, speeds, factors, fan, heater temperatures |
 | `moonraker_printer_objects` | read | `objects`, `fields` | List loaded objects, or query named objects with optional field lists |
@@ -111,11 +112,14 @@ accidentally remove everything.
 
 | Tool | Risk | Arguments | What it does |
 | --- | --- | --- | --- |
-| `moonraker_run_macro` | high | `name` | Run a loaded `gcode_macro` (approval required) |
+| `moonraker_list_macros` | read | — | Loaded `gcode_macro` names with their defined variables |
+| `moonraker_run_macro` | high | `name`, `params` | Run a loaded `gcode_macro` (approval required) |
 
-Macros may heat, move, or do anything the macro author wrote, so they are always
-approval-gated. Parameters are not accepted; the macro runs with defaults. Prefer a
-dedicated structured tool when one exists.
+Macros may heat, move, or do anything the macro author wrote, so execution is always
+approval-gated. `params` is an optional object of key/value pairs (strings, numbers,
+booleans) rendered as `NAME KEY=VALUE`; string values are G-code quoted, booleans become
+`1`/`0`, and at most 16 parameters are accepted. Prefer a dedicated structured tool when
+one exists.
 
 ## Restarts and host administration
 

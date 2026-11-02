@@ -210,7 +210,7 @@ For HTTP clients that support remote MCP servers, use
   "mcp": {
     "moonraker": {
       "type": "local",
-      "command": ["mcp-moonraker"],
+      "command": ["/home/you/.cargo/bin/mcp-moonraker"],
       "enabled": true,
       "environment": {
         "MOONRAKER_URL": "http://192.168.1.50:7125"
@@ -219,6 +219,12 @@ For HTTP clients that support remote MCP servers, use
   }
 }
 ```
+
+Prefer an absolute binary path: the process is spawned with the manifest
+`environment` plus whatever OpenCode inherits, and a bare command name fails the
+moment `PATH` does not include `~/.cargo/bin`. If tool calls report unreachable
+Moonraker or HTTP 401, work through
+[setup-and-security.md](setup-and-security.md).
 
 ### Agent instructions
 

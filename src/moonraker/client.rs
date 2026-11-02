@@ -40,6 +40,9 @@ pub struct MoonrakerClient {
     base: Url,
     api_key: Option<SecretString>,
     max_response_bytes: usize,
+    /// Per-request budget for `printer.gcode.script` calls, which only return
+    /// once the script has finished executing.
+    gcode_timeout: Duration,
     request_id: std::sync::Arc<AtomicU64>,
 }
 
@@ -50,6 +53,7 @@ impl std::fmt::Debug for MoonrakerClient {
             .field("base", &self.base)
             .field("api_key_configured", &self.api_key.is_some())
             .field("max_response_bytes", &self.max_response_bytes)
+            .field("gcode_timeout_secs", &self.gcode_timeout.as_secs())
             .finish_non_exhaustive()
     }
 }
@@ -73,6 +77,7 @@ impl MoonrakerClient {
             base,
             api_key: config.api_key.clone(),
             max_response_bytes: config.max_response_bytes,
+            gcode_timeout: Duration::from_secs(config.script_timeout_secs),
             request_id: std::sync::Arc::new(AtomicU64::new(1)),
         })
     }
@@ -101,6 +106,18 @@ impl MoonrakerClient {
 
     /// Perform a JSON-RPC call and return the raw `result` value.
     pub async fn call_value(&self, method: &str, params: Option<Value>) -> Result<Value> {
+        self.call_value_with_timeout(method, params, None).await
+    }
+
+    /// Perform a JSON-RPC call with a per-request timeout override.
+    ///
+    /// `Some(duration)` replaces the client-wide timeout for this single call.
+    pub async fn call_value_with_timeout(
+        &self,
+        method: &str,
+        params: Option<Value>,
+        timeout: Option<Duration>,
+    ) -> Result<Value> {
         let id = self.request_id.fetch_add(1, Ordering::Relaxed);
         let mut body = json!({
             "jsonrpc": "2.0",
@@ -111,10 +128,15 @@ impl MoonrakerClient {
             body["params"] = params;
         }
 
-        let response = self
+        let mut request = self
             .authorized(self.http.post(self.endpoint("/server/jsonrpc")))
             .header(CONTENT_TYPE, "application/json")
-            .json(&body)
+            .json(&body);
+        if let Some(timeout) = timeout {
+            request = request.timeout(timeout);
+        }
+
+        let response = request
             .send()
             .await
             .map_err(|err| Error::Http(err.without_url()))?;
@@ -135,6 +157,22 @@ impl MoonrakerClient {
         value.get("result").cloned().ok_or_else(|| {
             Error::InvalidResponse("JSON-RPC response did not contain a result".to_string())
         })
+    }
+
+    /// Execute a G-code script and wait for Klipper to finish running it.
+    ///
+    /// Klipper only answers `printer.gcode.script` once the script has been
+    /// fully executed, so motion-heavy scripts (e.g. `G28` homing) and macros
+    /// that block (e.g. `TEMPERATURE_WAIT`) can run far longer than a normal
+    /// request. These calls use the dedicated `moonraker.script_timeout_secs`
+    /// budget instead of `moonraker.timeout_secs`.
+    pub async fn call_gcode_script(&self, script: &str) -> Result<Value> {
+        self.call_value_with_timeout(
+            "printer.gcode.script",
+            Some(json!({"script": script})),
+            Some(self.gcode_timeout),
+        )
+        .await
     }
 
     /// Call a REST endpoint that returns `{"result": ...}`.
@@ -355,6 +393,7 @@ mod tests {
             url: base.to_string(),
             api_key: Some(SecretString::from("test-key")),
             timeout_secs: 5,
+            script_timeout_secs: 5,
             tls_verify: true,
             max_response_bytes: 1024 * 1024,
         })
@@ -401,6 +440,45 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.to_string().contains("boom"));
+    }
+
+    /// A `printer.gcode.script` call only replies once the script finishes, so
+    /// it must use the dedicated script timeout instead of the normal request
+    /// timeout — this is what keeps `G28` homing from reporting a spurious
+    /// timeout while the homing still completes on the printer.
+    #[tokio::test]
+    async fn gcode_script_overrides_request_timeout() {
+        let server = MockServer::start().await;
+        // 2 s delay: longer than the client's 1 s normal timeout.
+        Mock::given(method("POST"))
+            .and(path("/server/jsonrpc"))
+            .and(body_partial_json(json!({"method": "printer.gcode.script"})))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "result": {"ok": true}
+                    }))
+                    .set_delay(Duration::from_secs(2)),
+            )
+            .mount(&server)
+            .await;
+        let config = MoonrakerConfig {
+            url: server.uri(),
+            api_key: None,
+            timeout_secs: 1,
+            script_timeout_secs: 30,
+            tls_verify: true,
+            max_response_bytes: 1024 * 1024,
+        };
+        let slow_client = MoonrakerClient::new(&config).unwrap();
+
+        // Normal RPC: cancelled by the 1 s request timeout.
+        assert!(slow_client.call_value("server.info", None).await.is_err());
+        // Same call shape as a script: allowed to run to completion.
+        let value = slow_client.call_gcode_script("G28 X Y Z").await.unwrap();
+        assert_eq!(value["ok"], true);
     }
 
     #[tokio::test]

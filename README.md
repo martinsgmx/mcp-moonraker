@@ -8,8 +8,14 @@ files, history, and diagnostics — plus a deliberately small set of controlled 
 Anything destructive requires a two-step, single-use approval instead of running on the
 first request.
 
-- **47 tools** for status, cameras, heaters, motion, files, job queue, print control, host
-  administration, and safety.
+- **`moonraker_verify_connection` probes the link**: `connected`, round-trip
+  latency, Moonraker/Klipper versions, and — when the endpoint is down or rejects
+  the API key — a classified diagnosis with concrete next steps. Call it first
+  (or after any transport/401 failure) instead of retrying other tools; the agent
+  instructions also tell it to.
+
+- **48 tools plus a connection verifier** for status, connectivity, cameras, heaters, motion,
+  files, job queue, print control, host administration, and safety.
 - **Irreversible actions are off or approval-gated.** Raw G-code, host administration, and
   config writes are disabled by default; emergency stop is always available.
 - **The approved action is the executed action.** Confirmation replays the stored tool and
@@ -147,19 +153,38 @@ TLS and rate limiting in a reverse proxy before exposing it. See
 - MCP protocol `2025-11-25` via `rust-mcp-sdk` 1.1.0. The tool layer is isolated from the SDK
   so a future protocol revision can be adopted without changing tools.
 - `printer.cfg`, `moonraker.conf`, and service units do not need changes for a trusted local
-  client. If Moonraker requires authentication, set `MOONRAKER_API_KEY`.
+  client. If Moonraker requires authentication, set `MOONRAKER_API_KEY` (Moonraker-side
+  user/password logins and oneshot tokens are not supported — see
+  [docs/setup-and-security.md](docs/setup-and-security.md)).
+
+When in doubt about URL, auth, or connectivity, work through
+[docs/setup-and-security.md](docs/setup-and-security.md): it walks through every
+network topology (same host, LAN, nginx/TLS, remote), how to configure and
+retrieve Moonraker's API key, and a troubleshooting matrix for "the request never
+reaches Moonraker".
 
 ## Troubleshooting
 
-- **Unreachable:** check `MOONRAKER_URL` and `curl http://127.0.0.1:7125/server/info`. A
-  container needs the host's LAN address, not `127.0.0.1`.
+- **Unreachable / "transport error":** check `MOONRAKER_URL` (the default
+  `http://127.0.0.1:7125` only works when the MCP process runs on the same host as
+  Moonraker) and run the exact request with
+  `curl http://<url>/server/info`. Transport errors mention *why* (connection
+  refused, DNS, timeout, TLS) plus a fix hint in the same message. A container
+  needs the host's LAN address, not `127.0.0.1`.
+- **Moonraker API error 401:** Moonraker rejected the MCP's credentials. Set
+  `MOONRAKER_API_KEY` to the value of
+  `curl http://127.0.0.1:7125/access/api_key` run from the printer host, and
+  check that `force_logins` is not enabled in `moonraker.conf` (it blocks all
+  non-interactive clients). Username/password logins from Mainsail/Fluidd are
+  *not* a substitute for the API key.
 - **No tools appear:** run with `MCP_MOONRAKER_LOG_LEVEL=mcp_moonraker=debug` (logs go to
   stderr only), use an absolute binary path, and check `MCP_MOONRAKER_CONFIG`.
 - **Action disabled:** local policy, not Moonraker. Check `mcp-moonraker tools` or
   `moonraker_policy_info`.
 - **Camera fails:** check `snapshot_url` from `moonraker_cameras` and fetch it from the MCP
   host. `localhost` URLs from a container point at the container.
-- **HTTP 401:** send `Authorization: Bearer <token>`.
+- **HTTP 401:** send `Authorization: Bearer <token>` — this is the 401 from
+  *this server's own HTTP transport*, unrelated to the Moonraker-side 401 above.
 
 ## Development
 

@@ -66,6 +66,11 @@ fn instructions() -> String {
     [
         "You are connected to a 3D printer through Moonraker.",
         "",
+        "Connectivity: if any moonraker_* tool fails with a transport, timeout, or \
+         unauthorized (401) error, call moonraker_verify_connection next. It reports \
+         connected, latency, versions, and a classified diagnosis; do not call other \
+         printer tools until it reports connected=true.",
+        "",
         "Reading state is always allowed: use moonraker_printer_status for an overview, \
          moonraker_temperatures for heaters/sensors, and moonraker_camera_snapshot for a \
          current frame.",

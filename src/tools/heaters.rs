@@ -125,10 +125,7 @@ async fn set_heater(
         gcode_quote(&heater),
         temperature
     );
-    let response = ctx
-        .client
-        .call_value("printer.gcode.script", Some(json!({"script": script})))
-        .await?;
+    let response = ctx.client.call_gcode_script(&script).await?;
 
     let mut objects = std::collections::BTreeMap::new();
     objects.insert(heater.clone(), json!(["temperature", "target", "power"]));
@@ -164,13 +161,7 @@ async fn set_heater(
 }
 
 async fn turn_off_heaters(ctx: &ToolContext) -> Result<rust_mcp_sdk::schema::CallToolResult> {
-    let response = ctx
-        .client
-        .call_value(
-            "printer.gcode.script",
-            Some(json!({"script": "TURN_OFF_HEATERS"})),
-        )
-        .await?;
+    let response = ctx.client.call_gcode_script("TURN_OFF_HEATERS").await?;
     Ok(json_result(
         &json!({"result": response}),
         Some("All heaters have been turned off."),
@@ -256,10 +247,7 @@ async fn set_fan(
         )));
     };
 
-    let response = ctx
-        .client
-        .call_value("printer.gcode.script", Some(json!({"script": script})))
-        .await?;
+    let response = ctx.client.call_gcode_script(&script).await?;
     Ok(json_result(
         &json!({
             "fan": fan,

@@ -44,7 +44,7 @@ use crate::{
     config::Config,
     error::{Error, Result},
     moonraker::MoonrakerClient,
-    safety::{ApprovalStore, Capability, Decision, Policy, Risk},
+    safety::{ApprovalFailure, ApprovalStore, Capability, Decision, Policy, Risk},
 };
 
 use args::Args;
@@ -89,6 +89,21 @@ pub struct ToolSpec {
 }
 
 impl ToolSpec {
+    /// Risk used for policy evaluation and approval creation.
+    ///
+    /// Most tools have a fixed risk. Uploads are a plain mutation for a new
+    /// file but escalate to `High` when `overwrite=true`, because replacing an
+    /// existing G-code file is destructive and must be double-confirmed.
+    #[must_use]
+    pub fn effective_risk(&self, args: &Value) -> Risk {
+        if self.name == "moonraker_file_upload"
+            && args.get("overwrite").and_then(Value::as_bool) == Some(true)
+        {
+            return Risk::High;
+        }
+        self.risk
+    }
+
     fn tool(&self) -> Tool {
         Tool {
             annotations: Some(ToolAnnotations {
@@ -212,16 +227,17 @@ impl ToolRegistry {
 
         let started = Instant::now();
         let args = Args::parse(arguments, spec.allowed_args)?.into_value();
+        let risk = spec.effective_risk(&args);
 
         match spec.gate {
-            Gate::Policy => match ctx.policy.evaluate(spec.capability, spec.risk) {
+            Gate::Policy => match ctx.policy.evaluate(spec.capability, risk) {
                 Decision::Allow => {}
                 Decision::Deny(reason) => {
                     Self::audit_denied(ctx, spec, &args, &reason, started);
                     return Ok(tool_error(&reason));
                 }
                 Decision::NeedsApproval => {
-                    return Self::prepare_approval(ctx, spec, &args, started);
+                    return Self::prepare_approval(ctx, spec, &args, risk, started);
                 }
             },
             Gate::Emergency => {
@@ -259,7 +275,10 @@ impl ToolRegistry {
             )));
         }
         if spec.gate == Gate::Policy {
-            if let Decision::Deny(reason) = ctx.policy.evaluate(spec.capability, spec.risk) {
+            if let Decision::Deny(reason) = ctx
+                .policy
+                .evaluate(spec.capability, spec.effective_risk(&args))
+            {
                 return Err(Error::Policy(reason));
             }
         }
@@ -323,16 +342,17 @@ impl ToolRegistry {
         ctx: &ToolContext,
         spec: &ToolSpec,
         args: &Value,
+        risk: Risk,
         started: Instant,
     ) -> Result<CallToolResult> {
         let summary = (spec.summarize)(args);
         let record = ctx
             .approvals
-            .create(spec.name, args.clone(), spec.risk, summary)?;
+            .create(spec.name, args.clone(), risk, summary)?;
         ctx.approvals.announce(&record);
         ctx.audit.record(
             spec.name,
-            spec.risk,
+            risk,
             spec.capability.as_str(),
             Some(&record.id),
             args,
@@ -354,9 +374,12 @@ impl ToolRegistry {
         let phrase = args.optional_string("confirmation_phrase")?;
         let acknowledge = args.required_bool("acknowledge")?;
 
-        let record = match ctx.approvals.consume(&id, phrase.as_deref(), acknowledge) {
+        let record = match ctx
+            .approvals
+            .consume_detailed(&id, phrase.as_deref(), acknowledge)
+        {
             Ok(record) => record,
-            Err(err) => {
+            Err(failure) => {
                 ctx.audit.record(
                     "moonraker_confirm_action",
                     Risk::High,
@@ -365,12 +388,9 @@ impl ToolRegistry {
                     &args.as_value(),
                     Outcome::Denied,
                     started.elapsed(),
-                    Some(&err.public_message()),
+                    Some(&failure.message),
                 );
-                return Ok(tool_error(&format!(
-                    "{}\n\nNo action was executed.",
-                    err.public_message()
-                )));
+                return Ok(approval_failure_result(&failure));
             }
         };
 
@@ -483,6 +503,37 @@ pub fn json_result(value: &impl serde::Serialize, preface: Option<&str>) -> Call
         None => body,
     };
     CallToolResult::text_content(vec![TextContent::from(text)])
+}
+
+/// Structured error result whose body is still readable JSON.
+#[must_use]
+pub fn json_error_result(value: &impl serde::Serialize) -> CallToolResult {
+    let mut result = json_result(value, None);
+    result.is_error = Some(true);
+    result
+}
+
+/// Structured, idempotent error for a confirmation that did not execute.
+fn approval_failure_result(failure: &ApprovalFailure) -> CallToolResult {
+    let reprepare = failure.reason.requires_reprepare();
+    json_error_result(&json!({
+        "error": "approval_not_executed",
+        "reason": failure.reason.as_str(),
+        "message": failure.message,
+        "approval_id": failure.id,
+        "tool": failure.tool,
+        "expires_at": failure.expires_at,
+        // Aliases matching the field names used in transfer/preflight proposals.
+        "expired_at": failure.expires_at,
+        "requires_reprepare": reprepare,
+        "reprepare_required": reprepare,
+        "no_action_executed": true,
+        "next_action": if reprepare {
+            "Prepare the action again with the destructive tool, then confirm the new id."
+        } else {
+            "Correct the confirmation input and call moonraker_confirm_action again."
+        },
+    }))
 }
 
 /// Plain text result.
@@ -607,4 +658,189 @@ pub fn schema_properties(schema: &Value) -> Vec<String> {
         .and_then(Value::as_object)
         .map(|properties| properties.keys().cloned().collect())
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wiremock::{
+        matchers::{body_partial_json, method, path},
+        Mock, MockServer, ResponseTemplate,
+    };
+
+    fn test_context(server: &MockServer) -> (tempfile::TempDir, ToolContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = crate::config::Config::default();
+        config.moonraker.url = server.uri();
+        config.approval.state_dir = dir.path().to_string_lossy().to_string();
+        let ctx = ToolContext::new(config).unwrap();
+        (dir, ctx)
+    }
+
+    #[tokio::test]
+    async fn upload_overwrite_is_gated_and_confirmation_is_idempotent() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/server/jsonrpc"))
+            .and(body_partial_json(
+                json!({"method": "server.files.metadata"}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {"filename": "part.gcode", "size": 5}
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/server/files/upload"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+                "action": "create_file",
+                "item": {"path": "part.gcode", "root": "gcodes", "size": 5}
+            })))
+            .mount(&server)
+            .await;
+
+        let (_dir, ctx) = test_context(&server);
+        let registry = ToolRegistry::build();
+
+        // A non-overwrite upload of an existing file is refused immediately.
+        let err = registry
+            .call(
+                &ctx,
+                "moonraker_file_upload",
+                Some(json!({"filename": "part.gcode", "data_base64": "aGVsbG8="})),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.public_message().contains("already exists"));
+
+        // Overwriting escalates to high risk and needs an approval.
+        let prepared = registry
+            .call(
+                &ctx,
+                "moonraker_file_upload",
+                Some(json!({
+                    "filename": "part.gcode",
+                    "data_base64": "aGVsbG8=",
+                    "overwrite": true
+                })),
+            )
+            .await
+            .unwrap();
+        let prompt: Value = serde_json::from_str(&first_text(&prepared).unwrap()).unwrap();
+        assert_eq!(prompt["status"], "approval_required");
+        assert_eq!(prompt["risk"], "high");
+        let id = prompt["approval_id"].as_str().unwrap().to_string();
+        let phrase = prompt["confirmation_phrase"].as_str().unwrap().to_string();
+
+        let confirm = json!({
+            "approval_id": id,
+            "confirmation_phrase": phrase,
+            "acknowledge": true
+        });
+        let executed = registry
+            .call(&ctx, "moonraker_confirm_action", Some(confirm.clone()))
+            .await
+            .unwrap();
+        assert!(first_text(&executed).unwrap().contains("executed"));
+
+        let replay = registry
+            .call(&ctx, "moonraker_confirm_action", Some(confirm))
+            .await
+            .unwrap();
+        assert_eq!(replay.is_error, Some(true));
+        let error: Value = serde_json::from_str(&first_text(&replay).unwrap()).unwrap();
+        assert_eq!(error["reason"], "already_consumed");
+        assert_eq!(error["requires_reprepare"], true);
+        assert_eq!(error["no_action_executed"], true);
+    }
+
+    #[tokio::test]
+    async fn preflight_reports_missing_file_as_blocking() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/server/jsonrpc"))
+            .and(body_partial_json(json!({"method": "server.info"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "jsonrpc": "2.0", "id": 1, "result": {"klippy_state": "ready"}
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/server/jsonrpc"))
+            .and(body_partial_json(
+                json!({"method": "printer.objects.query"}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "jsonrpc": "2.0", "id": 2, "result": {
+                    "eventtime": 0.0,
+                    "status": {"print_stats": {"state": "idle", "filename": ""}}
+                }
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/server/jsonrpc"))
+            .and(body_partial_json(
+                json!({"method": "server.files.metadata"}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "jsonrpc": "2.0", "id": 3,
+                "error": {"code": 404, "message": "Metadata not available"}
+            })))
+            .mount(&server)
+            .await;
+
+        let (_dir, ctx) = test_context(&server);
+        let registry = ToolRegistry::build();
+        let result = registry
+            .call(
+                &ctx,
+                "moonraker_print_preflight",
+                Some(json!({"filename": "missing.gcode"})),
+            )
+            .await
+            .unwrap();
+        let report: Value = serde_json::from_str(&first_text(&result).unwrap()).unwrap();
+        assert_eq!(report["ready_to_prepare_start"], false);
+        assert_eq!(report["next_step"], Value::Null);
+        assert!(report["blocking_reasons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|reason| reason.as_str().unwrap().contains("not found")));
+    }
+
+    #[test]
+    fn new_tools_are_registered() {
+        let registry = ToolRegistry::build();
+        for name in [
+            "moonraker_file_upload",
+            "moonraker_file_verify",
+            "moonraker_print_preflight",
+            "moonraker_approval_detail",
+        ] {
+            assert!(registry.spec(name).is_some(), "missing tool {name}");
+        }
+    }
+
+    #[test]
+    fn upload_risk_escalates_on_overwrite() {
+        let registry = ToolRegistry::build();
+        let spec = registry.spec("moonraker_file_upload").unwrap();
+        assert_eq!(spec.effective_risk(&json!({})), Risk::Medium);
+        assert_eq!(spec.effective_risk(&json!({"overwrite": true})), Risk::High);
+        assert_eq!(
+            spec.effective_risk(&json!({"overwrite": false})),
+            Risk::Medium
+        );
+    }
+
+    #[test]
+    fn json_error_result_is_marked_as_error() {
+        let result = json_error_result(&json!({"reason": "expired"}));
+        assert_eq!(result.is_error, Some(true));
+        assert!(first_text(&result).unwrap().contains("expired"));
+    }
 }

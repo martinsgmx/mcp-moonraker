@@ -85,6 +85,127 @@ impl ApprovalRecord {
     }
 }
 
+/// Why an approval could not be consumed.
+///
+/// A structured reason lets `moonraker_confirm_action` tell an agent whether
+/// it can simply retry (wrong phrase) or must prepare the action again
+/// (consumed, denied, or expired).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalRejection {
+    /// `acknowledge=true` was not supplied.
+    AcknowledgementRequired,
+    /// The supplied id was malformed.
+    InvalidId,
+    /// No record exists for that id.
+    NotFound,
+    /// The record is not in a confirmable state.
+    NotOpen,
+    /// The single-use approval was already consumed.
+    AlreadyConsumed,
+    /// A human or the agent denied the approval.
+    Denied,
+    /// The TTL elapsed before confirmation.
+    Expired,
+    /// Out-of-band approval by a human is still missing.
+    HumanApprovalRequired,
+    /// The echoed confirmation phrase did not match.
+    PhraseMismatch,
+}
+
+impl ApprovalRejection {
+    /// Stable machine-readable label.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::AcknowledgementRequired => "acknowledgement_required",
+            Self::InvalidId => "invalid_id",
+            Self::NotFound => "not_found",
+            Self::NotOpen => "not_open",
+            Self::AlreadyConsumed => "already_consumed",
+            Self::Denied => "denied",
+            Self::Expired => "expired",
+            Self::HumanApprovalRequired => "human_approval_required",
+            Self::PhraseMismatch => "phrase_mismatch",
+        }
+    }
+
+    /// Human-readable message, matching the text of the plain `consume` API.
+    #[must_use]
+    pub fn message(self, id: &str) -> String {
+        match self {
+            Self::AcknowledgementRequired => {
+                "explicit acknowledgement is required: set acknowledge=true after reading the \
+                 action summary"
+                    .to_string()
+            }
+            Self::InvalidId | Self::NotFound => {
+                format!("approval '{id}' was not found or has expired")
+            }
+            Self::NotOpen => format!("approval '{id}' is not open"),
+            Self::AlreadyConsumed => {
+                format!("approval '{id}' has already been used; prepare the action again")
+            }
+            Self::Denied => format!("approval '{id}' was denied"),
+            Self::Expired => format!("approval '{id}' has expired; prepare the action again"),
+            Self::HumanApprovalRequired => format!(
+                "approval '{id}' still requires a human. Run `mcp-moonraker approve {id}` on the \
+                 machine running the MCP server, then confirm."
+            ),
+            Self::PhraseMismatch => {
+                "confirmation phrase does not match the prepared action".to_string()
+            }
+        }
+    }
+
+    /// Whether the caller must prepare a fresh approval before retrying.
+    #[must_use]
+    pub fn requires_reprepare(self) -> bool {
+        matches!(
+            self,
+            Self::InvalidId
+                | Self::NotFound
+                | Self::NotOpen
+                | Self::AlreadyConsumed
+                | Self::Denied
+                | Self::Expired
+        )
+    }
+}
+
+/// Structured detail about a failed confirmation.
+#[derive(Debug, Clone)]
+pub struct ApprovalFailure {
+    pub reason: ApprovalRejection,
+    pub id: String,
+    /// Human-readable explanation, safe to show to an agent.
+    pub message: String,
+    pub expires_at: Option<u64>,
+    pub tool: Option<String>,
+}
+
+impl ApprovalFailure {
+    fn new(reason: ApprovalRejection, id: &str, record: Option<&ApprovalRecord>) -> Self {
+        Self {
+            reason,
+            id: id.to_string(),
+            message: reason.message(id),
+            expires_at: record.map(|record| record.expires_at),
+            tool: record.map(|record| record.tool.clone()),
+        }
+    }
+
+    fn from_error(id: &str, err: &Error) -> Self {
+        Self {
+            reason: ApprovalRejection::NotFound,
+            id: id.to_string(),
+            message: err.public_message(),
+            expires_at: None,
+            tool: None,
+        }
+    }
+}
+
 /// Information returned to the agent when approval is required.
 #[derive(Debug, Clone, Serialize)]
 pub struct ApprovalPrompt {
@@ -92,6 +213,8 @@ pub struct ApprovalPrompt {
     pub approval_id: String,
     pub tool: String,
     pub summary: String,
+    /// Short description of the target (file name, job ids), when available.
+    pub target: Option<String>,
     pub risk: &'static str,
     pub expires_at: u64,
     pub expires_in_secs: u64,
@@ -259,69 +382,91 @@ impl ApprovalStore {
         Ok(record)
     }
 
-    /// Atomically verify and consume an approval.
+    /// Atomically verify and consume an approval, returning a structured
+    /// reason when it cannot be consumed.
     ///
     /// The caller must then execute `record.tool` with `record.args`.
-    pub fn consume(
+    pub fn consume_detailed(
         &self,
         id: &str,
         phrase: Option<&str>,
         acknowledge: bool,
-    ) -> Result<ApprovalRecord> {
+    ) -> std::result::Result<ApprovalRecord, ApprovalFailure> {
         if !acknowledge {
-            return Err(Error::Approval(
-                "explicit acknowledgement is required: set acknowledge=true after reading the \
-                 action summary"
-                    .to_string(),
+            return Err(ApprovalFailure::new(
+                ApprovalRejection::AcknowledgementRequired,
+                id,
+                None,
             ));
         }
+        if validate_id(id).is_err() {
+            return Err(ApprovalFailure::new(ApprovalRejection::InvalidId, id, None));
+        }
 
-        let lock = self.lock(id)?;
-        let mut record = self.load(id)?;
+        let lock = self
+            .lock(id)
+            .map_err(|err| ApprovalFailure::from_error(id, &err))?;
+        let mut record = self
+            .load(id)
+            .map_err(|err| ApprovalFailure::from_error(id, &err))?;
 
         if !record.is_open() {
-            return Err(Error::Approval(match record.status {
-                ApprovalStatus::Consumed => {
-                    format!("approval '{id}' has already been used; prepare the action again")
-                }
-                ApprovalStatus::Denied => format!("approval '{id}' was denied"),
-                ApprovalStatus::Expired => format!("approval '{id}' has expired"),
-                ApprovalStatus::Pending | ApprovalStatus::Approved => {
-                    format!("approval '{id}' is not open")
-                }
-            }));
+            let reason = match record.status {
+                ApprovalStatus::Consumed => ApprovalRejection::AlreadyConsumed,
+                ApprovalStatus::Denied => ApprovalRejection::Denied,
+                ApprovalStatus::Expired => ApprovalRejection::Expired,
+                ApprovalStatus::Pending | ApprovalStatus::Approved => ApprovalRejection::NotOpen,
+            };
+            return Err(ApprovalFailure::new(reason, id, Some(&record)));
         }
 
         if record.expires_at <= unix_now() {
             record.status = ApprovalStatus::Expired;
-            self.write_record(&record)?;
-            return Err(Error::Approval(format!(
-                "approval '{id}' has expired; prepare the action again"
-            )));
+            self.write_record(&record)
+                .map_err(|err| ApprovalFailure::from_error(id, &err))?;
+            return Err(ApprovalFailure::new(
+                ApprovalRejection::Expired,
+                id,
+                Some(&record),
+            ));
         }
 
         if self.requires_human() && record.human_approved_at.is_none() {
-            return Err(Error::Approval(format!(
-                "approval '{id}' still requires a human. Run `mcp-moonraker approve {}` on the \
-                 machine running the MCP server, then confirm.",
-                record.id
-            )));
+            return Err(ApprovalFailure::new(
+                ApprovalRejection::HumanApprovalRequired,
+                id,
+                Some(&record),
+            ));
         }
 
         if self.requires_phrase() {
             let supplied = phrase.unwrap_or_default();
             if !constant_time_eq(supplied.trim(), &record.phrase) {
-                return Err(Error::Approval(
-                    "confirmation phrase does not match the prepared action".to_string(),
+                return Err(ApprovalFailure::new(
+                    ApprovalRejection::PhraseMismatch,
+                    id,
+                    Some(&record),
                 ));
             }
         }
 
         record.consumed_at = Some(unix_now());
         record.status = ApprovalStatus::Consumed;
-        self.write_record(&record)?;
+        self.write_record(&record)
+            .map_err(|err| ApprovalFailure::from_error(id, &err))?;
         drop(lock);
         Ok(record)
+    }
+
+    /// Backwards-compatible wrapper that reports failures as plain text.
+    pub fn consume(
+        &self,
+        id: &str,
+        phrase: Option<&str>,
+        acknowledge: bool,
+    ) -> Result<ApprovalRecord> {
+        self.consume_detailed(id, phrase, acknowledge)
+            .map_err(|failure| Error::Approval(failure.message))
     }
 
     /// Record the outcome of an executed approval.
@@ -367,6 +512,7 @@ impl ApprovalStore {
             approval_id: record.id.clone(),
             tool: record.tool.clone(),
             summary: record.summary.clone(),
+            target: target_from_args(&record.args),
             risk: record.risk.as_str(),
             expires_at: record.expires_at,
             expires_in_secs: record.remaining_secs(),
@@ -387,6 +533,9 @@ impl ApprovalStore {
         eprintln!("│ ID:      {}", record.id);
         eprintln!("│ Tool:    {}", record.tool);
         eprintln!("│ Summary: {}", record.summary);
+        if let Some(target) = target_from_args(&record.args) {
+            eprintln!("│ Target:  {target}");
+        }
         eprintln!("│ Risk:    {}", record.risk.as_str());
         eprintln!("│ Expires: {} seconds", record.remaining_secs());
         eprintln!("│ Phrase:  {}", record.phrase);
@@ -461,6 +610,39 @@ impl ApprovalStore {
         fs::rename(&temp, &path)?;
         Ok(())
     }
+}
+
+/// Short description of the target of a prepared action.
+///
+/// This deliberately never returns payloads (`data_base64`, `script`, ...) so
+/// approval prompts and listings stay compact and secret-free.
+#[must_use]
+pub fn target_from_args(args: &Value) -> Option<String> {
+    for key in ["filename", "path", "job_id", "service", "name"] {
+        if let Some(value) = args.get(key).and_then(Value::as_str) {
+            let value = value.trim();
+            if !value.is_empty() {
+                return Some(value.to_string());
+            }
+        }
+    }
+    for key in ["job_ids", "filenames"] {
+        if let Some(items) = args.get(key).and_then(Value::as_array) {
+            let values = items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .collect::<Vec<_>>();
+            if !values.is_empty() {
+                return Some(format!("{}: {}", values.len(), values.join(", ")));
+            }
+        }
+    }
+    if args.get("all").and_then(Value::as_bool) == Some(true) {
+        return Some("entire job queue".to_string());
+    }
+    None
 }
 
 /// Canonical fingerprint of a tool call.
@@ -663,6 +845,53 @@ mod tests {
         assert!(store
             .consume(&record.id, Some(&record.phrase), true)
             .is_err());
+    }
+
+    #[test]
+    fn detailed_rejection_explains_reprepare() {
+        let (_dir, store) = store();
+        let record = store
+            .create("x", json!({}), Risk::High, "x".into())
+            .unwrap();
+        let failure = store
+            .consume_detailed(&record.id, Some("WRONG"), true)
+            .unwrap_err();
+        assert_eq!(failure.reason, ApprovalRejection::PhraseMismatch);
+        assert!(!failure.reason.requires_reprepare());
+        assert_eq!(failure.expires_at, Some(record.expires_at));
+
+        store
+            .consume_detailed(&record.id, Some(&record.phrase), true)
+            .unwrap();
+        let replay = store
+            .consume_detailed(&record.id, Some(&record.phrase), true)
+            .unwrap_err();
+        assert_eq!(replay.reason, ApprovalRejection::AlreadyConsumed);
+        assert!(replay.reason.requires_reprepare());
+    }
+
+    #[test]
+    fn target_extraction_never_returns_payloads() {
+        assert_eq!(
+            target_from_args(&json!({"filename": "parts/benchy.gcode"})).as_deref(),
+            Some("parts/benchy.gcode")
+        );
+        assert_eq!(
+            target_from_args(&json!({"job_ids": ["a", "b"]})).as_deref(),
+            Some("2: a, b")
+        );
+        assert_eq!(
+            target_from_args(&json!({"all": true})).as_deref(),
+            Some("entire job queue")
+        );
+        assert!(target_from_args(&json!({
+            "filename": "x.gcode",
+            "data_base64": "SECRET",
+            "script": "M112"
+        }))
+        .as_deref()
+        .is_some_and(|target| !target.contains("SECRET") && !target.contains("M112")));
+        assert!(target_from_args(&json!({"script": "M112"})).is_none());
     }
 
     #[test]

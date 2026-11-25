@@ -25,6 +25,7 @@ Print the resolved values (secrets omitted) with `mcp-moonraker print-config`.
 | `moonraker.script_timeout_secs` | `MOONRAKER_SCRIPT_TIMEOUT_SECS` | `120` | 1–600 seconds; used for `printer.gcode.script` calls, which return only after Klipper finishes the script (homing, long macros, `TEMPERATURE_WAIT`) |
 | `moonraker.tls_verify` | `MOONRAKER_TLS_VERIFY` | `true` | Disable only for a trusted self-signed host |
 | `moonraker.max_response_bytes` | `MOONRAKER_MAX_RESPONSE_BYTES` | `8388608` | 1 KiB–64 MiB |
+| `moonraker.max_upload_bytes` | `MOONRAKER_MAX_UPLOAD_BYTES` | `33554432` | 1 KiB–256 MiB; decoded upload cap and download cap for `moonraker_file_verify` |
 
 The API key is only forwarded to camera URLs on the same origin as Moonraker. Camera URLs
 on another host get no Moonraker credentials.

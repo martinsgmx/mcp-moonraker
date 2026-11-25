@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 
 use crate::{
     error::{Error, Result},
-    safety::{ApprovalStatus, Capability, Risk},
+    safety::{target_from_args, ApprovalRecord, ApprovalStatus, Capability, Risk},
     tools::{args::Args, json_result, no_summary, schema_object, Gate, ToolContext, ToolSpec},
 };
 
@@ -45,6 +45,20 @@ pub fn specs() -> Vec<ToolSpec> {
             summarize: no_summary,
             schema: crate::tools::empty_schema,
             handler: |ctx, _args| Box::pin(pending_approvals(ctx)),
+        },
+        ToolSpec {
+            name: "moonraker_approval_detail",
+            title: "Inspect one approval",
+            description: "Return the non-secret details of a single approval by id, including \
+                           its target, risk, status, expiry, and whether it can still be \
+                           confirmed. Works for consumed, denied, and expired records too.",
+            allowed_args: &["approval_id"],
+            capability: Capability::Read,
+            risk: Risk::Read,
+            gate: Gate::Internal,
+            summarize: no_summary,
+            schema: approval_id_schema,
+            handler: |ctx, args| Box::pin(approval_detail(ctx, args)),
         },
         ToolSpec {
             name: "moonraker_cancel_approval",
@@ -103,28 +117,64 @@ async fn policy_info(ctx: &ToolContext) -> Result<rust_mcp_sdk::schema::CallTool
     ))
 }
 
+/// Non-secret view of one approval record.
+fn approval_view(record: &ApprovalRecord, ctx: &ToolContext) -> Value {
+    json!({
+        "approval_id": record.id,
+        "tool": record.tool,
+        "summary": record.summary,
+        "target": target_from_args(&record.args),
+        "risk": record.risk.as_str(),
+        "status": status_label(record.status),
+        "created_at": record.created_at,
+        "expires_at": record.expires_at,
+        "expires_in_secs": record.remaining_secs(),
+        "human_approved": record.human_approved_at.is_some(),
+        "human_approval_required": ctx.approvals.requires_human(),
+        "confirmation_phrase_required": ctx.approvals.requires_phrase(),
+        "result": record.result,
+    })
+}
+
 async fn pending_approvals(ctx: &ToolContext) -> Result<rust_mcp_sdk::schema::CallToolResult> {
     let records = ctx.approvals.list_open()?;
     let approvals = records
         .iter()
-        .map(|record| {
-            json!({
-                "approval_id": record.id,
-                "tool": record.tool,
-                "summary": record.summary,
-                "risk": record.risk.as_str(),
-                "status": record.status,
-                "expires_at": record.expires_at,
-                "expires_in_secs": record.remaining_secs(),
-                "human_approved": record.human_approved_at.is_some(),
-            })
-        })
+        .map(|record| approval_view(record, ctx))
         .collect::<Vec<_>>();
     Ok(json_result(
         &json!({
             "count": approvals.len(),
             "approvals": approvals,
             "approval_mode": ctx.config.approval.mode,
+            "hint": "Use moonraker_approval_detail with an approval_id for full status, \
+                     including consumed or expired approvals.",
+        }),
+        None,
+    ))
+}
+
+async fn approval_detail(
+    ctx: &ToolContext,
+    arguments: Value,
+) -> Result<rust_mcp_sdk::schema::CallToolResult> {
+    let args = Args::parse(Some(arguments), &["approval_id"])?;
+    let id = args.required_string("approval_id")?;
+    let record = ctx.approvals.load(&id)?;
+    let can_confirm = record.is_open() && record.remaining_secs() > 0;
+    Ok(json_result(
+        &json!({
+            "approval": approval_view(&record, ctx),
+            "fingerprint": record.fingerprint,
+            "can_confirm": can_confirm,
+            "action": if can_confirm { "confirm" } else { "prepare_again" },
+            "instructions": if can_confirm {
+                "Call moonraker_confirm_action with the approval id, the confirmation phrase \
+                 (when required), and acknowledge=true."
+            } else {
+                "This approval cannot be executed. Prepare the action again with the \
+                 destructive tool and confirm the new id."
+            },
         }),
         None,
     ))

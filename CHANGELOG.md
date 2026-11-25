@@ -6,6 +6,33 @@ versioning.
 
 ## [Unreleased]
 
+### Added
+
+- `moonraker_file_upload`: upload base64-encoded G-code to the `gcodes` root only, with
+  a decoded size cap (`moonraker.max_upload_bytes` / `MOONRAKER_MAX_UPLOAD_BYTES`),
+  SHA-256 verification by Moonraker, and a checksum/filename response. New files are
+  medium-risk; `overwrite=true` escalates to high-risk and uses the existing approval
+  flow. Uploads never start a print.
+- `moonraker_file_verify`: read-only download + SHA-256/size verification with optional
+  expected values, per-field `checks`, and metadata warnings.
+- `moonraker_print_preflight`: read-only bundle of Klippy state, active job, queue,
+  temperatures, file metadata, and policy caps with `ready_to_prepare_start` and
+  `blocking_reasons`.
+- `moonraker_approval_detail`: full non-secret detail for one approval by id, including
+  consumed/expired records.
+- Structured confirmation errors: `moonraker_confirm_action` now returns `reason`,
+  `expires_at`, `requires_reprepare`, and `next_action` when an approval cannot be used.
+
+### Changed
+
+- `moonraker_file_metadata` returns a normalized `summary` plus `warnings` about missing or
+  inconsistent fields, and can include a SHA-256 with `include_checksum=true`.
+- `moonraker_pending_approvals` now includes the action `target`, risk, timestamps, and
+  confirmation requirements; approval prompts and the out-of-band console notice include
+  the target too.
+- Upload payloads (`data_base64`) are redacted from audit logs, and server instructions
+  describe the upload → verify → preflight → print workflow.
+
 ## [0.1.3] - 2026-11-02
 
 ### Added

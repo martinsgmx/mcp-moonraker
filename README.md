@@ -14,8 +14,11 @@ first request.
   (or after any transport/401 failure) instead of retrying other tools; the agent
   instructions also tell it to.
 
-- **48 tools plus a connection verifier** for status, connectivity, cameras, heaters, motion,
+- **52 tools plus a connection verifier** for status, connectivity, cameras, heaters, motion,
   files, job queue, print control, host administration, and safety.
+- **End-to-end file workflow**: `moonraker_file_upload` (base64, gcodes-only, checksum-verified),
+  `moonraker_file_verify` (sha256/size checks), `moonraker_print_preflight` (read-only readiness
+  report), then approval-gated `moonraker_print_start`.
 - **Irreversible actions are off or approval-gated.** Raw G-code, host administration, and
   config writes are disabled by default; emergency stop is always available.
 - **The approved action is the executed action.** Confirmation replays the stored tool and

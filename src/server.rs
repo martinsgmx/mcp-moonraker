@@ -75,12 +75,19 @@ fn instructions() -> String {
          moonraker_temperatures for heaters/sensors, and moonraker_camera_snapshot for a \
          current frame.",
         "",
+        "Print workflow: use moonraker_file_upload for base64 G-code (only the gcodes root; \
+         overwrite=true requires approval), then moonraker_file_verify to check its sha256, then \
+         moonraker_print_preflight for a read-only readiness report, then moonraker_print_start. \
+         Uploads never start a print on their own.",
+        "",
         "Mutation rules:",
         "- Low/medium-risk tools (heaters, fans, XY jogs, speed/flow, pause/resume, queue \
-         additions) run immediately when mutations are enabled.",
-        "- High/critical-risk tools return an approval prompt instead of acting. To execute, \
-         call moonraker_confirm_action with the approval_id, the confirmation_phrase from the \
-         prompt (when shown), and acknowledge=true. The phrase is single-use and expires.",
+         additions, new-file uploads) run immediately when mutations are enabled.",
+        "- High/critical-risk tools, including uploads with overwrite=true, return an approval \
+         prompt instead of acting. To execute, call moonraker_confirm_action with the \
+         approval_id, the confirmation_phrase from the prompt (when shown), and \
+         acknowledge=true. The phrase is single-use and expires. If confirmation fails, read \
+         the structured `reason`; `requires_reprepare=true` means a new approval is needed.",
         "- In out-of-band approval mode a human must also run `mcp-moonraker approve <id>` on \
          the server host before confirmation succeeds.",
         "- moonraker_emergency_stop is immediate and never waits for approval. Use it only for \

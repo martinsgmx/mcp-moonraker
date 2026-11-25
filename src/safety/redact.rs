@@ -23,6 +23,9 @@ const SENSITIVE_KEY_FRAGMENTS: &[&str] = &[
     "cookie",
     "session",
     "sudo_password",
+    // Upload payloads are large and can contain proprietary G-code; they are
+    // never useful in an audit record (the sha256 and filename are recorded).
+    "data_base64",
 ];
 
 /// Keys that are safe to expose even when they contain a sensitive fragment.
@@ -120,6 +123,14 @@ mod tests {
         // Conservative by design: a sensitive container is redacted wholesale
         // rather than trying to guess which of its children are safe.
         assert_eq!(output["authorization"], "[REDACTED]");
+    }
+
+    #[test]
+    fn redacts_upload_payloads() {
+        let input = json!({"filename": "a.gcode", "data_base64": "RzIxIHNlY3JldA=="});
+        let output = redact_value(&input);
+        assert_eq!(output["filename"], "a.gcode");
+        assert_eq!(output["data_base64"], "[REDACTED]");
     }
 
     #[test]

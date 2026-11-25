@@ -19,6 +19,7 @@ use std::{
 use futures_util::StreamExt;
 use reqwest::{
     header::{HeaderMap, HeaderValue, CONTENT_TYPE, USER_AGENT},
+    multipart::{Form, Part},
     Client, RequestBuilder, StatusCode,
 };
 use secrecy::{ExposeSecret, SecretString};
@@ -237,6 +238,47 @@ impl MoonrakerClient {
         read_limited(response, max_bytes).await
     }
 
+    /// Upload bytes to a Moonraker file root through `/server/files/upload`.
+    ///
+    /// Moonraker computes the SHA-256 of the received bytes and rejects the
+    /// upload when the supplied checksum does not match, giving end-to-end
+    /// verification of the transfer. The `print` form field is deliberately
+    /// never sent: starting a print remains a separate approval-gated tool.
+    pub async fn upload_file(
+        &self,
+        root: &str,
+        filename: &str,
+        bytes: Vec<u8>,
+        sha256_hex: &str,
+    ) -> Result<Value> {
+        let file = Part::bytes(bytes).file_name(filename.to_string());
+        let form = Form::new()
+            .text("root", root.to_string())
+            .text("checksum", sha256_hex.to_string())
+            .part("file", file);
+
+        let response = self
+            .authorized(self.http.post(self.endpoint("/server/files/upload")))
+            .multipart(form)
+            .send()
+            .await
+            .map_err(|err| Error::Http(err.without_url()))?;
+        let status = response.status();
+        let body = read_limited(response, self.max_response_bytes).await?;
+        if !status.is_success() {
+            return Err(http_error(status, &body));
+        }
+        let value: Value = serde_json::from_slice(&body).map_err(|err| {
+            Error::InvalidResponse(format!(
+                "Moonraker upload returned non-JSON data (HTTP {}): {err}",
+                status.as_u16()
+            ))
+        })?;
+        // The upload endpoint returns a bare object rather than the
+        // `{"result": ...}` envelope used by the REST read endpoints.
+        Ok(value.get("result").cloned().unwrap_or(value))
+    }
+
     /// Fetch bytes from an arbitrary URL (used for camera snapshots).
     ///
     /// `send_api_key` should only be true when the URL has the exact same
@@ -384,7 +426,7 @@ pub struct Wrapped<T> {
 mod tests {
     use super::*;
     use wiremock::{
-        matchers::{body_partial_json, header, method, path},
+        matchers::{body_partial_json, body_string_contains, header, method, path},
         Mock, MockServer, ResponseTemplate,
     };
 
@@ -396,6 +438,7 @@ mod tests {
             script_timeout_secs: 5,
             tls_verify: true,
             max_response_bytes: 1024 * 1024,
+            max_upload_bytes: 1024 * 1024,
         })
         .unwrap()
     }
@@ -420,6 +463,29 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(value["klippy_state"], "ready");
+    }
+
+    #[tokio::test]
+    async fn upload_sends_checksum_and_parses_bare_result() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/server/files/upload"))
+            .and(header("X-Api-Key", "test-key"))
+            .and(body_string_contains("checksum"))
+            .and(body_string_contains("filename=\"parts/test.gcode\""))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+                "action": "create_file",
+                "item": {"path": "parts/test.gcode", "root": "gcodes", "size": 5}
+            })))
+            .mount(&server)
+            .await;
+
+        let value = client(&server.uri())
+            .upload_file("gcodes", "parts/test.gcode", b"hello".to_vec(), "deadbeef")
+            .await
+            .unwrap();
+        assert_eq!(value["item"]["path"], "parts/test.gcode");
+        assert_eq!(value["item"]["size"], 5);
     }
 
     #[tokio::test]
@@ -471,6 +537,7 @@ mod tests {
             script_timeout_secs: 30,
             tls_verify: true,
             max_response_bytes: 1024 * 1024,
+            max_upload_bytes: 1024 * 1024,
         };
         let slow_client = MoonrakerClient::new(&config).unwrap();
 

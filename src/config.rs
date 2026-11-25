@@ -100,6 +100,9 @@ pub struct MoonrakerConfig {
     pub tls_verify: bool,
     /// Maximum JSON body size accepted from Moonraker.
     pub max_response_bytes: usize,
+    /// Maximum decoded size of a file accepted by the upload tool, and the
+    /// largest file the verification tool will download for hashing.
+    pub max_upload_bytes: usize,
 }
 
 impl Default for MoonrakerConfig {
@@ -111,6 +114,7 @@ impl Default for MoonrakerConfig {
             script_timeout_secs: 120,
             tls_verify: true,
             max_response_bytes: 8 * 1024 * 1024,
+            max_upload_bytes: 32 * 1024 * 1024,
         }
     }
 }
@@ -338,6 +342,9 @@ impl Config {
         if let Some(value) = env_usize("MOONRAKER_MAX_RESPONSE_BYTES")? {
             self.moonraker.max_response_bytes = value;
         }
+        if let Some(value) = env_usize("MOONRAKER_MAX_UPLOAD_BYTES")? {
+            self.moonraker.max_upload_bytes = value;
+        }
 
         if let Some(value) = env_str("MCP_MOONRAKER_TRANSPORT") {
             self.server.transport = value.parse().map_err(Error::Config)?;
@@ -475,6 +482,11 @@ impl Config {
                 "max_response_bytes must be between 1 KiB and 64 MiB".into(),
             ));
         }
+        if !(1024..=256 * 1024 * 1024).contains(&self.moonraker.max_upload_bytes) {
+            return Err(Error::Config(
+                "max_upload_bytes must be between 1 KiB and 256 MiB".into(),
+            ));
+        }
         if self.approval.ttl_secs < 5 || self.approval.ttl_secs > 3600 {
             return Err(Error::Config(
                 "approval TTL must be between 5 and 3600 seconds".into(),
@@ -584,6 +596,7 @@ impl Config {
                 "script_timeout_secs": self.moonraker.script_timeout_secs,
                 "tls_verify": self.moonraker.tls_verify,
                 "max_response_bytes": self.moonraker.max_response_bytes,
+                "max_upload_bytes": self.moonraker.max_upload_bytes,
             },
             "server": {
                 "transport": self.server.transport,
@@ -727,6 +740,19 @@ mod tests {
         assert_eq!(config.approval.mode, ApprovalMode::InBand);
         assert!(config.server.http.token.is_none());
         assert!(!config.public_view().to_string().contains("hunter2"));
+    }
+
+    #[test]
+    fn upload_limit_is_bounded() {
+        let mut config = Config::default();
+        assert_eq!(config.moonraker.max_upload_bytes, 32 * 1024 * 1024);
+        assert!(config.public_view()["moonraker"]["max_upload_bytes"]
+            .as_u64()
+            .is_some());
+        config.moonraker.max_upload_bytes = 0;
+        assert!(config.validate().is_err());
+        config.moonraker.max_upload_bytes = 256 * 1024 * 1024 + 1;
+        assert!(config.validate().is_err());
     }
 
     #[test]

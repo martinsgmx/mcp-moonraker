@@ -36,15 +36,20 @@ available. Both switches are checked before the capability-specific rules.
 
 ## Default approval-gated actions
 
-With default configuration, these seven tools prepare an approval instead of acting:
+With default configuration, these tools prepare an approval instead of acting:
 
 - `moonraker_print_start`
 - `moonraker_print_cancel`
 - `moonraker_file_delete`
+- `moonraker_file_upload` **only when `overwrite=true`** (a new file is a medium-risk mutation)
 - `moonraker_klipper_restart`
 - `moonraker_firmware_restart`
 - `moonraker_run_macro`
 - `moonraker_job_queue_remove`
+
+Upload risk is derived from the arguments, not from a second tool: `overwrite=false` runs
+normally, while `overwrite=true` is escalated to `high` before policy evaluation. The
+escalated risk is what appears in the approval prompt, audit record, and stored approval.
 
 `moonraker_raw_gcode`, `moonraker_host_reboot`, `moonraker_host_shutdown`,
 `moonraker_service_restart`, `moonraker_update_refresh`, and
@@ -82,7 +87,11 @@ Properties:
 - In `in_band` and `both` modes the phrase is compared in constant time.
 - In `out_of_band` and `both` modes a human must set `human_approved_at` through the CLI.
 - Records are single-use. A consumed approval cannot be retried, even if execution failed.
-- Expired, denied, and consumed records are rejected with distinct messages.
+- Failed confirmation returns a structured error with `reason`, `approval_id`, `expires_at`,
+  `requires_reprepare`, and `next_action`. A wrong phrase or missing acknowledgement can be
+  retried with the same approval; consumed, denied, and expired approvals cannot.
+- `moonraker_pending_approvals` and `moonraker_approval_detail` show the target, risk, and
+  expiry without dumping stored payloads.
 - The policy is re-evaluated at execution time. If an operator tightens the policy between
   prepare and confirm, the action is refused (and the approval is still consumed).
 - Preparation validates argument shape only. Target existence and live printer-state checks
@@ -90,7 +99,8 @@ Properties:
 - Per-record file locks make `approve`/`deny`/`confirm` safe across processes.
 
 Approval records contain the tool name, arguments, summary, risk, phrase, and timestamps.
-They may contain file names or macro names. Protect the state directory accordingly.
+They may contain file names, macro names, or the base64 payload of an upload. Protect the
+state directory accordingly; it is created with `0700` permissions on Unix.
 
 ### Choosing a mode
 
@@ -119,7 +129,9 @@ Structured tools validate before sending anything to Klipper:
   permits starting.
 - **Print pause/resume/cancel** — validated against the current print state.
 - **Files** — paths are relative to the `gcodes` root and traversal is rejected. Deleting
-  configuration files is not supported.
+  configuration files is not supported. Uploads accept only `.gcode`, `.g`, `.gco`, and `.nc`
+  files, never start a print, and default to refusing to overwrite an existing file. The
+  base64 payload is size-capped and its SHA-256 is checked by Moonraker at upload time.
 - **Queue** — job ids and file names are validated; `all=true` is explicit.
 - **Updates** — a component name is mandatory, so a missing argument cannot trigger a
   blanket upgrade.
@@ -159,7 +171,8 @@ Each call writes an event with:
 ```
 
 Outcomes include `prepared`, `allowed`, `denied`, `approval_required`, `confirmed`,
-`executed`, and `failed`. Arguments are redacted and truncated. Set
+`executed`, and `failed`. Arguments are redacted and truncated; upload payloads
+(`data_base64`) are always redacted. Set
 `logging.audit_log` to persist events; otherwise they go to stderr under the
 `mcp_moonraker::audit` target.
 

@@ -45,6 +45,8 @@ timeout_secs = 15
 script_timeout_secs = 120
 tls_verify = true
 max_response_bytes = 8388608
+# Decoded size cap for uploads and for files hashed by moonraker_file_verify.
+max_upload_bytes = 33554432
 
 [server]
 # "stdio" is the zero-friction default for local agents.

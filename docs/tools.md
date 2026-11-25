@@ -73,20 +73,38 @@ make sure the bed is clear.
 | Tool | Risk | Arguments | What it does |
 | --- | --- | --- | --- |
 | `moonraker_files_list` | read | `root`, `path`, `limit` | List files/directories under a Moonraker root (default `gcodes`) |
-| `moonraker_file_metadata` | read | `filename` | Slicer metadata, estimated time, filament, thumbnails |
+| `moonraker_file_metadata` | read | `filename`, `include_checksum` | Slicer metadata, normalized `summary`, `warnings`, optional SHA-256 |
+| `moonraker_file_verify` | read | `filename`, `expected_sha256`, `expected_size` | Download a file and verify size/SHA-256 against expected values |
+| `moonraker_file_upload` | medium / high | `filename`, `data_base64`, `root`, `overwrite` | Upload base64 G-code to `gcodes`; approval required when overwriting |
 | `moonraker_file_delete` | high | `filename` | Delete a file from `gcodes` (approval required) |
 
 Paths are relative to the root and traversal outside it is rejected. Configuration files
-cannot be deleted, and uploads/writes are not available in v0.1.
+cannot be deleted. Uploads are confined to `gcodes`, accept `.gcode`, `.g`, `.gco`, and `.nc`,
+and never start a print. By default an existing file is not replaced; set `overwrite=true`
+to prepare an approval for the replacement. The decoded payload is capped by
+`moonraker.max_upload_bytes`, and the SHA-256 sent with the upload is verified by Moonraker.
+
+`moonraker_file_verify` is read-only: it downloads the file, hashes it locally, compares any
+expected values, and returns `verified`, per-field `checks`, metadata `warnings`, and the
+actual `sha256`/`size_bytes`. Use it after an upload or a manual transfer to confirm integrity.
+`moonraker_file_metadata({filename, include_checksum:true})` is a lighter alternative when a
+single hash is enough.
 
 ## Print control
 
 | Tool | Risk | Arguments | What it does |
 | --- | --- | --- | --- |
+| `moonraker_print_preflight` | read | `filename` | Read-only readiness report with blocking reasons |
 | `moonraker_print_start` | high | `filename` | Start a G-code file (approval required) |
 | `moonraker_print_pause` | medium | — | Pause the active print |
 | `moonraker_print_resume` | medium | — | Resume a paused print |
 | `moonraker_print_cancel` | high | — | Cancel the print (approval required) |
+
+`moonraker_print_preflight` consolidates the checks an agent would otherwise perform one by
+one: Klippy state, active job, job queue, temperatures, file existence and metadata, and
+local policy caps. It returns a `checks` array (`green`/`yellow`/`red`, `blocking`, `detail`,
+`evidence`), `blocking_reasons`, `warnings`, and `ready_to_prepare_start`. It is read-only and
+never starts a print. Call it before `moonraker_print_start`.
 
 Print start validates that the file exists under `gcodes` when the approved action
 executes; Moonraker itself enforces whether the printer is ready to start. Pause/resume/
@@ -156,12 +174,23 @@ normal agent use. Enabling it requires `policy.allow_raw_gcode = true` (or
 | --- | --- | --- | --- |
 | `moonraker_policy_info` | read | — | Effective policy and approval settings (no secrets) |
 | `moonraker_pending_approvals` | read | — | Open approvals, including recovered ids after restart |
+| `moonraker_approval_detail` | read | `approval_id` | Full non-secret detail for one approval (any status) |
 | `moonraker_cancel_approval` | read | `approval_id` | Cancel an approval permanently |
 | `moonraker_confirm_action` | high | `approval_id`, `confirmation_phrase`, `acknowledge` | Execute the prepared action |
 | `moonraker_emergency_stop` | critical | — | Immediate Klipper emergency stop |
 
 `moonraker_confirm_action` is the only tool that executes a stored approval. It never
-accepts a new action. `moonraker_emergency_stop` bypasses read-only mode and approvals; it
+accepts a new action. Both approval-listing tools report `target`, `risk`, `expires_at`, and
+a human-readable `summary`; `moonraker_approval_detail` also works for consumed, denied, and
+expired records.
+
+When confirmation cannot be completed, `moonraker_confirm_action` returns a structured
+error (`isError: true`) with `reason`, `message`, `approval_id`, `tool`, `expires_at` /
+`expired_at`, `requires_reprepare` / `reprepare_required`, `no_action_executed`, and
+`next_action`. Reasons are
+`acknowledgement_required`, `human_approval_required`, `phrase_mismatch` (retryable with the
+same id), and `not_found`, `invalid_id`, `not_open`, `already_consumed`, `denied`, `expired`
+(re-prepare required). `moonraker_emergency_stop` bypasses read-only mode and approvals; it
 is the one action that must always be available.
 
 ## Resources
@@ -200,3 +229,5 @@ appropriate read tools.
 - File paths are relative, use `/`, and may not escape the root.
 - Booleans are real JSON booleans (`true`), not strings.
 - Optional arguments may be omitted or set to `null`.
+- `data_base64` uses the standard alphabet; embedded whitespace is ignored and payloads are
+  size-capped. Payloads are redacted in audit logs.
